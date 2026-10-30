@@ -1,11 +1,17 @@
-name: Security Pipeline
+name: Security Pipeline (SAST + DAST)
 
 on:
   push:
     branches: [main, develop]
   pull_request:
     branches: [main]
-  workflow_dispatch:   # ручной запуск
+  workflow_dispatch:
+
+# Глобальные права для всех джоб (необходимы для загрузки SARIF)
+permissions:
+  contents: read
+  security-events: write
+  actions: read
 
 env:
   IMAGE_NAME: finance-backend
@@ -13,14 +19,11 @@ env:
 
 jobs:
   # ============================================================
-  # 1. SAST: Semgrep — поиск небезопасных паттернов в коде
+  # 1. SAST: Semgrep
   # ============================================================
   sast-semgrep:
     name: SAST — Semgrep
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write   # для загрузки SARIF-отчёта в GitHub Security
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +38,14 @@ jobs:
         env:
           SEMGREP_SEND_METRICS: "off"
 
+      # Гарантируем наличие файла, чтобы следующий шаг не упал
+      - name: Ensure SARIF file exists
+        if: always()
+        run: |
+          if [ ! -f semgrep.sarif ]; then
+            echo '{"version":"2.1.0","$schema":"https://json.schemastore.org/sarif-2.1.0.json","runs":[]}' > semgrep.sarif
+          fi
+
       - name: Upload Semgrep SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@v3
@@ -43,7 +54,7 @@ jobs:
           category: semgrep
 
   # ============================================================
-  # 2. SAST: Bandit — специализированный сканер Python
+  # 2. SAST: Bandit
   # ============================================================
   sast-bandit:
     name: SAST — Bandit
@@ -71,22 +82,20 @@ jobs:
           category: bandit
 
   # ============================================================
-  # 3. SAST: Trivy — уязвимости в Docker-образе и зависимостях
+  # 3. SAST: Trivy (исправлен тег)
   # ============================================================
   sast-trivy:
     name: SAST — Trivy (image + fs)
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
     steps:
       - uses: actions/checkout@v4
 
       - name: Build image for scan
         run: docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
 
-      - name: Run Trivy on filesystem (dependencies)
-        uses: aquasecurity/trivy-action@0.28.0
+      # Исправлено: используем тег v0.32.0 (существует) вместо 0.28.0
+      - name: Run Trivy on filesystem
+        uses: aquasecurity/trivy-action@v0.32.0
         with:
           scan-type: fs
           scan-ref: .
@@ -95,7 +104,7 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Run Trivy on Docker image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.32.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
           format: sarif
@@ -117,19 +126,18 @@ jobs:
           category: trivy-image
 
   # ============================================================
-  # 4. DAST: OWASP ZAP Baseline — динамический скан API
+  # 4. DAST: OWASP ZAP Baseline
   # ============================================================
   dast-zap:
     name: DAST — OWASP ZAP Baseline
     runs-on: ubuntu-latest
-    needs: [sast-semgrep]     # запускаемся после SAST (можно убрать)
+    needs: [sast-semgrep]
     steps:
       - uses: actions/checkout@v4
 
       - name: Start stack with docker compose
         run: |
           docker compose up -d --build
-          # ждём, пока health-check пройдёт
           for i in $(seq 1 30); do
             if curl -s http://localhost:8000/health | grep -q "ok"; then
               echo "Backend is up"
@@ -148,7 +156,7 @@ jobs:
           target: "http://localhost:8000"
           rules_file_name: ".zap/rules.tsv"
           cmd_options: "-a -j"
-          fail_action: false   # на старте не валить билд, потом поменять на true
+          fail_action: false
           allow_issue_writing: true
 
       - name: Stop stack
