@@ -1,4 +1,4 @@
-name: Security Pipeline (SAST + DAST)
+name: Security Pipeline
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Глобальные права для всех джоб (необходимы для загрузки SARIF)
+# Глобальные права, необходимые для загрузки SARIF-отчетов в Security Dashboard
 permissions:
   contents: read
   security-events: write
@@ -19,7 +19,7 @@ env:
 
 jobs:
   # ============================================================
-  # 1. SAST: Semgrep
+  # 1. SAST: Semgrep — поиск небезопасных паттернов в коде
   # ============================================================
   sast-semgrep:
     name: SAST — Semgrep
@@ -38,23 +38,16 @@ jobs:
         env:
           SEMGREP_SEND_METRICS: "off"
 
-      # Гарантируем наличие файла, чтобы следующий шаг не упал
-      - name: Ensure SARIF file exists
-        if: always()
-        run: |
-          if [ ! -f semgrep.sarif ]; then
-            echo '{"version":"2.1.0","$schema":"https://json.schemastore.org/sarif-2.1.0.json","runs":[]}' > semgrep.sarif
-          fi
-
+      # Загружаем отчет только если файл реально создан (защита от пустых прогонов)
       - name: Upload Semgrep SARIF
-        if: always()
+        if: always() && hashFiles('semgrep.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
           category: semgrep
 
   # ============================================================
-  # 2. SAST: Bandit
+  # 2. SAST: Bandit — специализированный сканер Python
   # ============================================================
   sast-bandit:
     name: SAST — Bandit
@@ -71,18 +64,20 @@ jobs:
 
       - name: Run Bandit
         run: |
+          # Генерируем SARIF, игнорируя код возврата (|| true), чтобы билд не падал
           bandit -r app/ -f sarif -o bandit.sarif -ll || true
-          bandit -r app/ -ll
+          # Выводим результат в консоль для наглядности
+          bandit -r app/ -ll || true
 
       - name: Upload Bandit SARIF
-        if: always()
+        if: always() && hashFiles('bandit.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: bandit.sarif
           category: bandit
 
   # ============================================================
-  # 3. SAST: Trivy (исправлен тег)
+  # 3. SAST: Trivy — уязвимости в зависимостях и Docker-образе
   # ============================================================
   sast-trivy:
     name: SAST — Trivy (image + fs)
@@ -90,10 +85,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Сначала собираем образ, чтобы Trivy мог его просканировать
       - name: Build image for scan
         run: docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
 
-      # Исправлено: используем тег v0.32.0 (существует) вместо 0.28.0
       - name: Run Trivy on filesystem
         uses: aquasecurity/trivy-action@v0.32.0
         with:
@@ -112,38 +107,39 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Upload Trivy FS SARIF
-        if: always()
+        if: always() && hashFiles('trivy-fs.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
 
       - name: Upload Trivy Image SARIF
-        if: always()
+        if: always() && hashFiles('trivy-image.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
 
   # ============================================================
-  # 4. DAST: OWASP ZAP Baseline
+  # 4. DAST: OWASP ZAP Baseline — динамический скан API
   # ============================================================
   dast-zap:
     name: DAST — OWASP ZAP Baseline
     runs-on: ubuntu-latest
-    needs: [sast-semgrep]
+    needs: [sast-semgrep] # Запускаем DAST только если базовый SAST не упал
     steps:
       - uses: actions/checkout@v4
 
       - name: Start stack with docker compose
         run: |
           docker compose up -d --build
+          # Ждем, пока приложение поднимется и пройдет healthcheck
           for i in $(seq 1 30); do
             if curl -s http://localhost:8000/health | grep -q "ok"; then
-              echo "Backend is up"
+              echo "Backend is up and running"
               break
             fi
-            echo "Waiting for backend... ($i)"
+            echo "Waiting for backend... ($i/30)"
             sleep 2
           done
 
@@ -156,7 +152,7 @@ jobs:
           target: "http://localhost:8000"
           rules_file_name: ".zap/rules.tsv"
           cmd_options: "-a -j"
-          fail_action: false
+          fail_action: false # Пока не валим пайплайн, чтобы избежать ложных срабатываний
           allow_issue_writing: true
 
       - name: Stop stack
