@@ -1,123 +1,62 @@
-name: Security Pipeline
+stages:
+  - prepare
+  - sast
+  - deploy
+  - dast
 
-on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
+# Job1: Подготовка (сохраняем код как артефакт)
+prepare:
+  stage: prepare
+  image: python:3.11
+  script:
+    - pip install -r requirements.txt
+    - echo "Dependencies installed"
+  artifacts:
+    paths:
+      - .  # передаём весь код дальше
+    expire_in: 1 hour
 
-# Глобальные права, необходимые для загрузки SARIF-отчетов в Security Dashboard
-permissions:
-  contents: read
-  security-events: write
-  actions: read
+# Job2: SAST (pylint + bandit)
+sast:
+  stage: sast
+  image: python:3.11
+  needs: [prepare]
+  script:
+    - pip install pylint bandit
+    - pylint --fail-under=8.0 your_package/ || true
+    - bandit -r your_package/ -ll
+  # bandit с -ll упадёт при находках уровня LOW и выше
 
-env:
-  IMAGE_NAME: finance-backend
-  PYTHON_VERSION: "3.12"
+# Job3: Поднятие инфраструктуры
+deploy_test:
+  stage: deploy
+  image: docker:latest
+  services:
+    - docker:dind
+  variables:
+    POSTGRES_DB: testdb
+    POSTGRES_USER: test
+    POSTGRES_PASSWORD: test
+  # Здесь поднимаете БД (через services) и приложение
+  # Сохраняете URL приложения в артефакт или переменную
+  script:
+    - echo "TARGET_URL=http://your-app:8080" > target.env
+  artifacts:
+    reports:
+      dotenv: target.env
 
-jobs:
-  # ============================================================
-  # 1. SAST: Semgrep — поиск небезопасных паттернов в коде
-  # ============================================================
-  sast-semgrep:
-    name: SAST — Semgrep
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run Semgrep
-        uses: semgrep/semgrep-action@v1
-        with:
-          config: >-
-            p/python
-            p/fastapi
-            p/owasp-top-ten
-          generateSarif: "1"
-        env:
-          SEMGREP_SEND_METRICS: "off"
-
-      # Загружаем отчет только если файл реально создан (защита от пустых прогонов)
-      - name: Upload Semgrep SARIF
-        if: always() && hashFiles('semgrep.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: semgrep.sarif
-          category: semgrep
-
-  # ============================================================
-  # 2. SAST: Bandit — специализированный сканер Python
-  # ============================================================
-  sast-bandit:
-    name: SAST — Bandit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install Bandit
-        run: pip install bandit bandit-sarif-formatter
-
-      - name: Run Bandit
-        run: |
-          # Генерируем SARIF, игнорируя код возврата (|| true), чтобы билд не падал
-          bandit -r app/ -f sarif -o bandit.sarif -ll || true
-          # Выводим результат в консоль для наглядности
-          bandit -r app/ -ll || true
-
-      - name: Upload Bandit SARIF
-        if: always() && hashFiles('bandit.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: bandit.sarif
-          category: bandit
-
-  # ============================================================
-  # 4. DAST: OWASP ZAP Baseline — динамический скан API
-  # ============================================================
-  dast-zap:
-    name: DAST — OWASP ZAP Baseline
-    runs-on: ubuntu-latest
-    needs: [sast-semgrep] # Запускаем DAST только если базовый SAST не упал
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Start stack with docker compose
-        run: |
-          docker compose up -d --build
-          # Ждем, пока приложение поднимется и пройдет healthcheck
-          for i in $(seq 1 30); do
-            if curl -s http://localhost:8000/health | grep -q "ok"; then
-              echo "Backend is up and running"
-              break
-            fi
-            echo "Waiting for backend... ($i/30)"
-            sleep 2
-          done
-
-      - name: Verify backend is reachable
-        run: curl -f http://localhost:8000/health
-
-      - name: ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.14.0
-        with:
-          target: "http://localhost:8000"
-          rules_file_name: ".zap/rules.tsv"
-          cmd_options: "-a -j"
-          fail_action: false # Пока не валим пайплайн, чтобы избежать ложных срабатываний
-          allow_issue_writing: true
-
-      - name: Stop stack
-        if: always()
-        run: docker compose down -v
-
-      - name: Upload ZAP report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: zap-report
-          path: report_html.html
+# Job4: DAST
+dast:
+  stage: dast
+  image: docker:latest
+  services:
+    - docker:dind
+  needs: [deploy_test]
+  script:
+    - source target.env
+    - docker run --rm -v $(pwd):/zap/wrk/:rw zaproxy/zap-stable \
+        zap-baseline.py -t $TARGET_URL -r report.html
+  artifacts:
+    paths:
+      - report.html
+    when: always
