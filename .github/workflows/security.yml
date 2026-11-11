@@ -30,7 +30,7 @@ jobs:
 
       - name: Run Bandit
         run: |
-          bandit -r main.py -lll -f json -o bandit-report.json
+          bandit -r -lll -f json -o bandit-report.json
 
       - name: Upload Bandit report
         if: always()
