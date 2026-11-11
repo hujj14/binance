@@ -74,6 +74,11 @@ jobs:
 
       - name: Start Application
         run: |
+      - name: Start Application
+        run: |
+          # Запускаем приложение и пишем все его логи в файл app.log
+          python main.py > app.log 2>&1 &
+          
           echo "Waiting for application to start..."
           for i in {1..30}; do
             if curl -s http://localhost:8080/health > /dev/null; then
@@ -82,7 +87,12 @@ jobs:
             fi
             sleep 1
           done
-          echo "Application failed to start in time."
+          
+          echo "========================================="
+          echo "APPLICATION FAILED TO START! LOGS BELOW:"
+          echo "========================================="
+          cat app.log
+          echo "========================================="
           exit 1
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/testdb
