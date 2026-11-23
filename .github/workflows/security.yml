@@ -42,25 +42,20 @@ jobs:
   deploy_test:
     runs-on: ubuntu-latest
     needs: sast
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
+      # 1. Собираем Docker-образ
+      - name: Build Docker Image
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          docker build -t my-secure-app .
 
-      - name: Start Application with In-Memory DB
+      - name: Run Docker Container
         run: |
-          # Запускаем единый скрипт, который создает БД, сидит данные и стартует сервер
-          python start_server.py > app.log 2>&1 &
+          # -d (detached) запускает в фоне, -p пробрасывает порт 8080
+          docker run -d --name app-container -p 8080:8080 my-secure-app
           
           echo "Waiting for application to start..."
           for i in {1..30}; do
@@ -74,7 +69,8 @@ jobs:
           echo "========================================="
           echo "APPLICATION FAILED TO START! LOGS BELOW:"
           echo "========================================="
-          cat app.log
+          # Выводим логи контейнера, если приложение не поднялось
+          docker logs app-container
           exit 1
           
   dast:
