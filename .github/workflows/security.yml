@@ -59,6 +59,7 @@ jobs:
       - name: Download Docker Image (если вы разделяли)
         # (здесь ваш код скачивания и запуска контейнера)
         run: |
+          docker images \
           docker run -d --name app-container -p 8080:8080 my-secure-app
           
           # Ждем готовности
