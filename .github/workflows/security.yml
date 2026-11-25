@@ -57,44 +57,47 @@ jobs:
           name: docker-image
           path: app-image.tar
           retention-days: 1
-
   dast:
     runs-on: ubuntu-latest
-    needs: deploy_test
+    needs: deploy_test # Обязательно ждем поднятия приложения!
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download Docker Image
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image
-
-      - name: Load Docker Image
-        run: docker load < app-image.tar
-
-      - name: Run Docker Container
+      - name: Download Docker Image (если вы разделяли)
+        # (здесь ваш код скачивания и запуска контейнера)
         run: |
+          docker load < app-image.tar
           docker run -d --name app-container -p 8080:8080 my-secure-app
           
-          echo "Waiting for application to start..."
+          # Ждем готовности
           for i in {1..30}; do
             if curl -s http://localhost:8080/health > /dev/null; then
-              echo "Application is up!"
-              exit 0
+              echo "App is up!"
+              break
             fi
             sleep 1
           done
-          
-          echo "APPLICATION FAILED TO START! LOGS BELOW:"
-          docker logs app-container
-          exit 1
 
-      - name: ZAP Baseline Scan (DAST)
-        uses: zaproxy/action-baseline@v0.14.0
+      # 1. Получаем токен и настраиваем ZAP
+      - name: Prepare ZAP Auth
+        run: |
+          chmod +x get_token.sh
+          ./get_token.sh
+
+      # 2. Скачиваем openapi.json с работающего приложения
+      - name: Download OpenAPI Spec
+        run: |
+          curl -s http://localhost:8080/openapi.json > openapi.json
+
+      # 3. Запускаем API Scan (вместо Baseline)
+      - name: ZAP API Scan
+        uses: zaproxy/action-api-scan@v0.7.0
         with:
-          target: 'http://localhost:8080'
+          target: 'http://localhost:8080' # Базовый URL
+          # Указываем ZAP, где лежит файл спецификации
+          cmd_options: '-f openapi -t /zap/wrk/openapi.json -z "-configfile /zap/wrk/zap-auth.prop"'
           allow_issue_writing: false
           fail_action: true
 
@@ -104,4 +107,3 @@ jobs:
         with:
           name: zap-report
           path: report_html.html
-          if-no-files-found: warn
