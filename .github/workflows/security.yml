@@ -3,7 +3,6 @@ name: Security Pipeline
 on:
   push:
     branches: [main]
-  workflow_dispatch:
   pull_request:
 
 jobs:
@@ -37,10 +36,10 @@ jobs:
           path: bandit-report.json
           if-no-files-found: warn
 
+  # === Job3: Сборка и передача Docker-образа ===
   deploy_test:
     runs-on: ubuntu-latest
     needs: sast
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -48,46 +47,69 @@ jobs:
       - name: Build Docker Image
         run: |
           docker build -t my-secure-app .
+          # Сохраняем образ в файл
+          docker save my-secure-app > app-image.tar
+
+      # ВОТ ЗДЕСЬ МЫ СОХРАНЯЕМ АРХИВ
+      - name: Upload Docker Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: app-image.tar
+          retention-days: 1
+
+  # === Job4: Скачивание, запуск и DAST ===
   dast:
     runs-on: ubuntu-latest
-    needs: deploy_test # Обязательно ждем поднятия приложения!
-    
+    needs: deploy_test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download Docker Image (если вы разделяли)
-        # (здесь ваш код скачивания и запуска контейнера)
+      # ВОТ ЗДЕСЬ МЫ СКАЧИВАЕМ АРХИВ
+      - name: Download Docker Image Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker Image and Run
         run: |
-          docker images 
+          # Загружаем образ из архива
+          docker load < app-image.tar
+          
+          # Запускаем контейнер
           docker run -d --name app-container -p 8080:8080 my-secure-app
           
-          # Ждем готовности
+          # Ждем, пока приложение поднимется
+          echo "Waiting for application to start..."
           for i in {1..30}; do
             if curl -s http://localhost:8080/health > /dev/null; then
-              echo "App is up!"
-              break
+              echo "Application is up!"
+              exit 0
             fi
             sleep 1
           done
+          
+          echo "APPLICATION FAILED TO START! LOGS BELOW:"
+          docker logs app-container
+          exit 1
 
-      # 1. Получаем токен и настраиваем ZAP
+      # Подготовка токена (если вы сделали скрипт)
       - name: Prepare ZAP Auth
         run: |
           chmod +x get_token.sh
           ./get_token.sh
 
-      # 2. Скачиваем openapi.json с работающего приложения
+      # Скачиваем спецификацию
       - name: Download OpenAPI Spec
         run: |
           curl -s http://localhost:8080/openapi.json > openapi.json
 
-      # 3. Запускаем API Scan (вместо Baseline)
+      # Запускаем ZAP API Scan
       - name: ZAP API Scan
         uses: zaproxy/action-api-scan@v0.7.0
         with:
-          target: 'http://localhost:8080' # Базовый URL
-          # Указываем ZAP, где лежит файл спецификации
+          target: 'http://localhost:8080'
           cmd_options: '-f openapi -t /zap/wrk/openapi.json -z "-configfile /zap/wrk/zap-auth.prop"'
           allow_issue_writing: false
           fail_action: true
@@ -98,3 +120,4 @@ jobs:
         with:
           name: zap-report
           path: report_html.html
+          if-no-files-found: warn
